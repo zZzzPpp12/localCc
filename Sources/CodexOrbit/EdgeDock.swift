@@ -22,9 +22,12 @@ enum EdgeDockGeometry {
         frame.midX < visible.midX ? .left : .right
     }
 
-    static func expandedFrame(edge: DockEdge, visible: CGRect, size: CGSize, centerY: CGFloat) -> CGRect {
+    static func expandedFrame(edge: DockEdge, visible: CGRect, size: CGSize, centerY: CGFloat, compact: Bool = false) -> CGRect {
         let x = edge == .left ? visible.minX + inset : visible.maxX - size.width - inset
-        let y = min(max(centerY - size.height / 2, visible.minY), visible.maxY - size.height)
+        // When only the capsule is visible, its footprint determines the vertical
+        // limits. The hidden orb is a position anchor and may extend off screen.
+        let halfHeight = compact ? tabSize.height / 2 + 4 : size.height / 2
+        let y = min(max(centerY, visible.minY + halfHeight), visible.maxY - halfHeight) - size.height / 2
         return CGRect(x: x, y: y, width: size.width, height: size.height)
     }
 

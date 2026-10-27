@@ -47,6 +47,17 @@ struct EdgeDockTests {
         let bottomTab = EdgeDockGeometry.tabFrame(edge: .left, visible: visible, expanded: bottom, scale: 1)
         check(visible.contains(EdgeDockGeometry.detailsFrame(edge: .right, visible: visible, tab: topTab)), "popup near screen top stays visible")
         check(visible.contains(EdgeDockGeometry.detailsFrame(edge: .left, visible: visible, tab: bottomTab)), "popup near screen bottom stays visible")
+        for work in [visible, leftDisplay] {
+            for edge in [DockEdge.left, .right] {
+                for y in [work.minY - 100, work.minY + 32, work.midY, work.maxY - 32, work.maxY + 100] {
+                    let anchor = EdgeDockGeometry.expandedFrame(edge: edge, visible: work, size: size, centerY: y, compact: true)
+                    let capsule = EdgeDockGeometry.tabFrame(edge: edge, visible: work, expanded: anchor, scale: 1)
+                    let expectedY = min(max(y, work.minY + 32), work.maxY - 32)
+                    check(work.contains(capsule) && abs(capsule.midY - expectedY) <= 0.5, "capsule can dock near top/bottom independently of hidden orb size")
+                    check(EdgeDockGeometry.edge(of: anchor, in: work) == edge, "partially offscreen hidden anchor retains the correct dock")
+                }
+            }
+        }
         for scale in [0.8, 1.0, 1.35] {
             let expanded = EdgeDockGeometry.expandedFrame(edge: .right, visible: visible, size: CGSize(width: 164 * scale, height: 176 * scale), centerY: right.midY)
             let strip = EdgeDockGeometry.tabFrame(edge: .right, visible: visible, expanded: expanded, scale: scale)

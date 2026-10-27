@@ -51,7 +51,7 @@ final class AppServerClient {
             guard let self else { throw OrbitError.disconnected }
             try self.launch(customPath: customPath)
             do {
-                _ = try await self.request("initialize", params: ["clientInfo": ["name": "codex_orbit", "title": "Codex Orbit", "version": "0.8.0"]])
+                _ = try await self.request("initialize", params: ["clientInfo": ["name": "codex_orbit", "title": "Codex Orbit", "version": "0.8.1"]])
                 try self.notify("initialized", params: [:])
                 self.ready = true
             } catch {

@@ -43,7 +43,8 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var monitors: [Any] = []
     private var workspaceObservers: [NSObjectProtocol] = []
     private var localObservers: [NSObjectProtocol] = []
-    private var dragStart: (mouse: NSPoint, origin: NSPoint)?
+    private enum DragSource { case orb, capsule }
+    private var dragStart: (mouse: NSPoint, origin: NSPoint, source: DragSource)?
     private var menu: NSMenu?
     private var isSmokeTest: Bool { ProcessInfo.processInfo.arguments.contains("--smoke-test") || ProcessInfo.processInfo.arguments.contains("--edge-self-test") || ProcessInfo.processInfo.arguments.contains("--hud-self-test") || ProcessInfo.processInfo.arguments.contains("--approval-self-test") || ProcessInfo.processInfo.arguments.contains("--activity-self-test") }
     private var isDiagnostic: Bool { ProcessInfo.processInfo.arguments.contains("--diagnose") }
@@ -256,7 +257,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                            openDetails: { [weak self] in
                                guard let self, self.dragStart == nil else { return }
                                if self.detailsPanel?.isVisible == true { self.hideDetails() } else { self.showDetails() }
-                           }, dragChanged: { [weak self] in self?.dragOrb() },
+                           }, dragChanged: { [weak self] start, point in self?.dragOrb(from: .orb, start: start, to: point) },
                            dragEnded: { [weak self] in self?.finishDrag() },
                            contextMenu: { [weak self] in self?.openSettings() },
                            hoverChanged: { [weak self] _ in self?.updateEdgeVisibility() })
@@ -283,7 +284,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             var frame = NSRect(origin: previousFrame.origin, size: size)
             if let visible = bestScreen(for: previousFrame)?.visibleFrame,
                let edge = EdgeDockGeometry.edge(of: previousFrame, in: visible) {
-                frame = EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: size, centerY: previousFrame.midY)
+                frame = EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: size, centerY: previousFrame.midY, compact: preferences.autoHideAtEdge)
             }
             panel.setFrame(frame, display: true)
             if let hosting = panel.contentView as? NSHostingView<OrbView> {
@@ -322,7 +323,9 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 if inside { self?.showHoverDetails() } else { self?.updateEdgeVisibility() }
             },
             openDetails: { [weak self] in self?.showHoverDetails(force: true) },
-            openSettings: { [weak self] in self?.openSettings() }))
+            openSettings: { [weak self] in self?.openSettings() },
+            dragChanged: { [weak self] start, point in self?.dragOrb(from: .capsule, start: start, to: point) },
+            dragEnded: { [weak self] in self?.finishDrag() }))
         hosting.sizingOptions = []
         panel.contentView = hosting
         edgePanel = panel
@@ -357,7 +360,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
               edgeGeometry() == nil, let panel = orbPanel,
               let visible = bestScreen(for: panel.frame)?.visibleFrame else { return }
         let edge = EdgeDockGeometry.nearestEdge(of: panel.frame, in: visible)
-        panel.setFrame(EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: panel.frame.size, centerY: panel.frame.midY), display: true)
+        panel.setFrame(EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: panel.frame.size, centerY: panel.frame.midY, compact: true), display: true)
         savePosition()
     }
 
@@ -366,6 +369,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         cancelCollapse()
         edgePanel?.orderOut(nil)
         guard preferences.showOrb else { return }
+        keepOrbOnScreen(allowCompact: false)
         let wasCollapsed = edgeState.isCollapsed
         if wasCollapsed { edgeState.isCollapsed = false }
         if wasCollapsed || orbPanel?.isVisible != true { orbPanel?.orderFrontRegardless() }
@@ -451,6 +455,9 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             edgePanel?.orderOut(nil); orbPanel?.orderOut(nil)
             return
         }
+        // A moving capsule owns its frame until mouse-up. In particular, don't
+        // reveal the old orb or let the 200 ms docking timer reset this frame.
+        guard dragStart == nil else { cancelCollapse(); return }
         dockOrbIfNeeded()
         guard preferences.autoHideAtEdge, let geometry = edgeGeometry(), orbPanel != nil, dragStart == nil else {
             expandOrb(); return
@@ -480,32 +487,38 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
-    private func dragOrb() {
-        guard let panel = orbPanel else { return }
-        let mouse = NSEvent.mouseLocation
-        if dragStart == nil { dragStart = (mouse, panel.frame.origin); hideDetails() }
-        cancelCollapse()
-        if let start = dragStart {
-            panel.setFrameOrigin(NSPoint(x: start.origin.x + mouse.x - start.mouse.x, y: start.origin.y + mouse.y - start.mouse.y))
+    private func dragOrb(from source: DragSource, start: NSPoint, to mouse: NSPoint) {
+        guard let panel = source == .capsule ? edgePanel : orbPanel else { return }
+        if dragStart == nil {
+            guard panel.isVisible else { return }
+            dragStart = (start, panel.frame.origin, source)
+            hideDetails()
         }
+        cancelCollapse()
+        if let start = dragStart, start.source == source {
+            panel.setFrameOrigin(NSPoint(x: start.origin.x + mouse.x - start.mouse.x, y: start.origin.y + mouse.y - start.mouse.y))
+            if source == .capsule, let orb = orbPanel {
+                orb.setFrameOrigin(NSPoint(x: panel.frame.midX - orb.frame.width / 2, y: panel.frame.midY - orb.frame.height / 2))
+            }
+        }
+        updateApprovalPanels(); updateQuotaHUD()
     }
 
     private func finishDrag() {
-        guard dragStart != nil else { return }
+        guard let start = dragStart else { return }
         dragStart = nil
         guard let panel = orbPanel else { return }
-        let screen = bestScreen(for: panel.frame)
+        let footprint = start.source == .capsule ? (edgePanel?.frame ?? panel.frame) : panel.frame
+        let screen = bestScreen(for: footprint)
         if preferences.snapToEdge, let visible = screen?.visibleFrame {
-            var rect = panel.frame
-            let inset: CGFloat = 4
-            rect.origin.x = rect.midX < visible.midX ? visible.minX + inset : visible.maxX - rect.width - inset
-            rect.origin.y = min(max(rect.minY, visible.minY), visible.maxY - rect.height)
-            panel.setFrame(rect, display: true)
-            // Save the destination rather than the intermediate animated origin.
-            UserDefaults.standard.set(rect.minX, forKey: "orbX")
-            UserDefaults.standard.set(rect.minY, forKey: "orbY")
-        } else { keepOrbOnScreen(); savePosition() }
+            let edge = EdgeDockGeometry.nearestEdge(of: footprint, in: visible)
+            panel.setFrame(EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: panel.frame.size,
+                                                         centerY: footprint.midY, compact: preferences.autoHideAtEdge), display: true)
+        } else { keepOrbOnScreen() }
+        savePosition()
+        hoverDismissedUntilExit = true
         updateEdgeVisibility()
+        updateApprovalPanels(); updateQuotaHUD()
     }
 
     private func bestScreen(for rect: NSRect) -> NSScreen? {
@@ -527,16 +540,22 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         savePosition()
     }
 
-    private func keepOrbOnScreen() {
+    private func keepOrbOnScreen(allowCompact: Bool = true) {
         guard let panel = orbPanel else { return }
         guard let screen = bestScreen(for: panel.frame) else { return }
         var frame = panel.frame
         let visible = screen.visibleFrame
         if frame.intersection(visible).isEmpty { positionOnMainScreen(); return }
-        frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
-        frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
-        panel.setFrame(frame, display: true)
-        savePosition()
+        if allowCompact, preferences.autoHideAtEdge, let edge = EdgeDockGeometry.edge(of: frame, in: visible) {
+            frame = EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: frame.size, centerY: frame.midY, compact: true)
+        } else {
+            frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+            frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        }
+        if panel.frame != frame {
+            panel.setFrame(frame, display: true)
+            savePosition()
+        }
     }
 
     private func savePosition() {
@@ -684,7 +703,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func diagnosticObject() -> [String: Any] {
-        var result: [String: Any] = ["application": "Codex Orbit", "version": "0.8.0", "status": store.statusText, "cliDetected": store.cliPath != nil]
+        var result: [String: Any] = ["application": "Codex Orbit", "version": "0.8.1", "status": store.statusText, "cliDetected": store.cliPath != nil]
         if let error = store.lastError { result["error"] = error }
         if let snapshot = store.snapshot {
             result["accountType"] = snapshot.account.type
@@ -736,7 +755,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let notifications = await UNUserNotificationCenter.current().notificationSettings()
         let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
         let geometry = edgeGeometry()
-        let report: [String: Any] = ["bundlePath": Bundle.main.bundleURL.path, "version": "0.8.0",
+        let report: [String: Any] = ["bundlePath": Bundle.main.bundleURL.path, "version": "0.8.1",
                                    "loginItemStatus": launchAtLogin.statusCode,
                                    "loginItemEnabled": launchAtLogin.isEnabled,
                                    "autoHideAtEdge": preferences.autoHideAtEdge,
@@ -859,6 +878,68 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         preferences.scale = oldScale
         applyPreferences()
+        // Exercise the actual NSView mouse handlers directly, without posting
+        // synthetic events into the OS or moving the user's pointer.
+        func dragSurface(_ view: NSView?) -> PointerDragView? {
+            guard let view else { return nil }
+            if let surface = view as? PointerDragView { return surface }
+            return view.subviews.lazy.compactMap { dragSurface($0) }.first
+        }
+        func mouseEvent(_ type: NSEvent.EventType, at screenPoint: NSPoint, in window: NSWindow) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: window.convertPoint(fromScreen: screenPoint), modifierFlags: [],
+                              timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                              context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+        }
+        if let panel = edgePanel, let visible = bestScreen(for: panel.frame)?.visibleFrame {
+            panel.contentView?.layoutSubtreeIfNeeded()
+            if let surface = dragSurface(panel.contentView) {
+                let initial = panel.frame, press = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
+                surface.mouseDown(with: mouseEvent(.leftMouseDown, at: press, in: panel))
+                surface.mouseDragged(with: mouseEvent(.leftMouseDragged, at: NSPoint(x: press.x + 1, y: press.y + 1), in: panel))
+                results["smallPointerJitterDoesNotDrag"] = dragStart == nil && panel.frame == initial
+                surface.mouseUp(with: mouseEvent(.leftMouseUp, at: press, in: panel))
+                results["nativeCapsuleClickStillOpensDashboard"] = hoverDetailsPanel?.isVisible == true
+
+                let target = NSPoint(x: visible.minX + 180, y: visible.midY + 90)
+                surface.mouseDown(with: mouseEvent(.leftMouseDown, at: press, in: panel))
+                surface.mouseDragged(with: mouseEvent(.leftMouseDragged, at: target, in: panel))
+                let moving = panel.frame
+                results["nativeCapsuleDragFollowsFullPointerDelta"] = abs(moving.midX - target.x) < 1 && abs(moving.midY - target.y) < 1
+                updateEdgeVisibility(pointer: outside)
+                results["dockingTimerDoesNotInterruptDrag"] = panel.frame == moving && dragStart != nil
+                results["dragKeepsCapsuleAndHidesDashboard"] = panel.isVisible && panel.frame.size == EdgeDockGeometry.tabSize && orbPanel?.isVisible == false && hoverDetailsPanel?.isVisible == false
+                // The final movement may arrive only in mouse-up, after the
+                // window has already changed origin since the previous event.
+                let release = NSPoint(x: visible.minX + 140, y: visible.maxY - 32)
+                surface.mouseUp(with: mouseEvent(.leftMouseUp, at: release, in: panel))
+                results["nativeReleaseDocksAtNewSideAndHeight"] = dragStart == nil && edgeGeometry()?.edge == .left && abs(panel.frame.midY - release.y) < 1
+                results["dragDoesNotTriggerClickDashboard"] = hoverDetailsPanel?.isVisible == false
+                keepOrbOnScreen()
+                updateEdgeVisibility(pointer: outside)
+                results["compactPositionSurvivesRestoreClamping"] = abs(panel.frame.midY - release.y) < 1
+
+                let nextPress = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
+                let nextRelease = NSPoint(x: visible.maxX - 120, y: visible.minY + 32)
+                surface.mouseDown(with: mouseEvent(.leftMouseDown, at: nextPress, in: panel))
+                surface.mouseDragged(with: mouseEvent(.leftMouseDragged, at: nextRelease, in: panel))
+                surface.mouseUp(with: mouseEvent(.leftMouseUp, at: nextRelease, in: panel))
+                results["capsuleCanDragBackToOtherEdge"] = edgeGeometry()?.edge == .right && abs(panel.frame.midY - nextRelease.y) < 1
+            }
+            preferences.autoHideAtEdge = false; preferences.snapToEdge = false
+            applyPreferences()
+            orbPanel?.contentView?.layoutSubtreeIfNeeded()
+            if let orb = orbPanel, let surface = dragSurface(orb.contentView) {
+                let press = NSPoint(x: orb.frame.midX, y: orb.frame.midY)
+                let target = NSPoint(x: visible.midX, y: visible.midY)
+                surface.mouseDown(with: mouseEvent(.leftMouseDown, at: press, in: orb))
+                surface.mouseDragged(with: mouseEvent(.leftMouseDragged, at: target, in: orb))
+                updateEdgeVisibility(pointer: outside)
+                surface.mouseUp(with: mouseEvent(.leftMouseUp, at: target, in: orb))
+                results["nativeFreeOrbDragKeepsChosenPosition"] = orb.isVisible && abs(orb.frame.midX - target.x) < 1 && abs(orb.frame.midY - target.y) < 1 && dragStart == nil
+            }
+            preferences.autoHideAtEdge = true; preferences.snapToEdge = true
+            applyPreferences()
+        }
         positionOnMainScreen()
         collapseOrb(pointer: outside)
         try? await Task.sleep(nanoseconds: 250_000_000)
@@ -869,7 +950,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if let data = try? JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: url) }
         print("Edge UI checks: \(results)")
         store.stop()
-        exit(results.count == 20 && results.values.allSatisfy({ $0 }) ? 0 : 1)
+        exit(results.count == 30 && results.values.allSatisfy({ $0 }) ? 0 : 1)
     }
 
     private func activitySelfTest(report url: URL) async {

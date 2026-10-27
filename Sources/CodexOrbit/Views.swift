@@ -30,7 +30,7 @@ struct OrbView: View {
     @ObservedObject var store: UsageStore
     @ObservedObject var preferences: OrbitPreferences
     var openDetails: () -> Void
-    var dragChanged: () -> Void
+    var dragChanged: (NSPoint, NSPoint) -> Void
     var dragEnded: () -> Void
     var contextMenu: () -> Void
     var hoverChanged: (Bool) -> Void = { _ in }
@@ -64,6 +64,7 @@ struct OrbView: View {
                 .opacity(store.isStale ? 0.70 : 1)
             }
             .buttonStyle(.plain)
+            .overlay { PointerDragSurface(clicked: openDetails, dragged: dragChanged, ended: dragEnded).accessibilityHidden(true) }
             .accessibilityLabel("Codex 额度，\(store.selectedWindow?.title ?? preferences.selectedPeriod.fallbackTitle)剩余 \(store.selectedWindow?.percentText ?? "未知")。点击展开详情")
             .help(orbHelp)
             HStack(spacing: 5) {
@@ -75,8 +76,6 @@ struct OrbView: View {
         .frame(width: 164, height: 176)
         .onHover { hovering = $0; hoverChanged($0) }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.20), value: hovering)
-        .simultaneousGesture(DragGesture(minimumDistance: 5, coordinateSpace: .global)
-            .onChanged { _ in dragChanged() }.onEnded { _ in dragEnded() })
         .contextMenu {
             Button("展开详情", action: openDetails)
             Button("立即刷新") { Task { await store.refresh() } }.disabled(store.isRefreshing)
@@ -156,6 +155,8 @@ struct EdgeTabView: View {
     var hoverChanged: (Bool) -> Void
     var openDetails: () -> Void
     var openSettings: () -> Void
+    var dragChanged: (NSPoint, NSPoint) -> Void
+    var dragEnded: () -> Void
 
     var body: some View {
         Button(action: openDetails) {
@@ -164,8 +165,10 @@ struct EdgeTabView: View {
                            activityPhase: activity.phase, animateActivity: activity.animationActive)
         }
         .buttonStyle(.plain)
+        .overlay { PointerDragSurface(clicked: openDetails, dragged: dragChanged, ended: dragEnded).accessibilityHidden(true) }
         .onHover(perform: hoverChanged)
-        .accessibilityLabel("Codex Orbit 侧边标签，\(summary)，\(store.statusText)，\(activity.phase.description)。移入指针在旁边查看 5h 和每周额度详情")
+        .accessibilityLabel("Codex Orbit 侧边标签，\(summary)，\(store.statusText)，\(activity.phase.description)。按住拖动调整位置，移入指针查看额度详情")
+        .help("按住拖动调整位置，松手吸附侧边；移入查看额度详情")
         .contextMenu {
             Button("额度详情", action: openDetails)
             Button("设置…", action: openSettings)
@@ -390,7 +393,7 @@ struct OrbitSettingsView: View {
                 Image(systemName: "circle.hexagongrid").font(.system(size: 30)).foregroundStyle(OrbitPalette.mint)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Codex Orbit").font(.system(size: 20, weight: .semibold))
-                    Text("薄荷双环 · v0.8.0").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("薄荷双环 · v0.8.1").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }.padding(24)
             Form {
