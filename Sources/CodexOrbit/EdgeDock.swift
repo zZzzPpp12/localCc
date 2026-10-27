@@ -54,6 +54,18 @@ enum EdgeDockGeometry {
                       y: tab.minY, width: handleSize.width, height: handleSize.height)
     }
 
+    static func slideFrame(edge: DockEdge, tab: CGRect, progress: Double) -> CGRect {
+        let amount = min(1, max(0, progress))
+        let width = handleSize.width + (tabSize.width - handleSize.width) * amount
+        return CGRect(x: edge == .left ? tab.minX : tab.maxX - width,
+                      y: tab.minY, width: width, height: tabSize.height)
+    }
+
+    static func slideEase(_ progress: Double) -> Double {
+        let t = min(1, max(0, progress))
+        return t * t * (3 - 2 * t)
+    }
+
     static func pointerIsInsideSidebar(_ point: CGPoint, tab: CGRect, details: CGRect?) -> Bool {
         if tab.insetBy(dx: -2, dy: -3).contains(point) { return true }
         guard let details else { return false }
@@ -79,4 +91,5 @@ final class EdgeDockState: ObservableObject {
     @Published var edge: DockEdge = .right
     @Published var isCollapsed = false
     @Published var isTucked = true
+    @Published var revealProgress: Double = 0
 }

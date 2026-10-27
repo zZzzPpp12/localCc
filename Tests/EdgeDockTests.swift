@@ -34,6 +34,20 @@ struct EdgeDockTests {
             }
         }
         let popup = EdgeDockGeometry.detailsFrame(edge: .right, visible: visible, tab: tab)
+        for edge in [DockEdge.left, .right] {
+            let full = EdgeDockGeometry.tabFrame(edge: edge, visible: visible, expanded: right, scale: 1)
+            var previousWidth: CGFloat = 0
+            for index in 0...20 {
+                let progress = EdgeDockGeometry.slideEase(Double(index) / 20)
+                let frame = EdgeDockGeometry.slideFrame(edge: edge, tab: full, progress: progress)
+                check(visible.contains(frame) && frame.width >= previousWidth && frame.midY == full.midY, "slide stays on its display with monotonic width and fixed height")
+                check(edge == .left ? frame.minX == full.minX : frame.maxX == full.maxX, "slide preserves the outer display edge")
+                previousWidth = frame.width
+            }
+            check(EdgeDockGeometry.slideFrame(edge: edge, tab: full, progress: 0).size == EdgeDockGeometry.handleSize, "animation begins at the exact narrow entry")
+            check(EdgeDockGeometry.slideFrame(edge: edge, tab: full, progress: 1) == full, "animation ends at the exact expanded capsule")
+        }
+        check(EdgeDockGeometry.slideEase(-1) == 0 && EdgeDockGeometry.slideEase(2) == 1 && EdgeDockGeometry.slideEase(0.5) == 0.5, "easing clamps endpoints without overshoot")
         check(visible.contains(popup) && popup.maxX < tab.minX, "right dock opens details on its inner left side")
         check(EdgeDockGeometry.pointerIsInsideSidebar(CGPoint(x: visible.maxX - 1, y: tab.midY), tab: tab, details: popup), "pointer on capsule keeps details open")
         check(EdgeDockGeometry.pointerIsInsideSidebar(CGPoint(x: popup.midX, y: popup.midY), tab: tab, details: popup), "pointer over details keeps them open")

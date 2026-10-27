@@ -160,13 +160,10 @@ struct EdgeTabView: View {
 
     var body: some View {
         Button(action: openDetails) {
-            if state.isTucked {
-                EdgeHandleReadout(window: store.window(.short), stale: store.isStale)
-            } else {
-                EdgeTabReadout(window: store.window(.short), stale: store.isStale,
-                               warning: store.lastError != nil || store.blocked,
-                               activityPhase: activity.phase, animateActivity: activity.animationActive)
-            }
+            EdgeSlideReadout(window: store.window(.short), stale: store.isStale,
+                             warning: store.lastError != nil || store.blocked,
+                             activityPhase: activity.phase, animateActivity: activity.animationActive,
+                             edge: state.edge, progress: state.revealProgress)
         }
         .buttonStyle(.plain)
         .overlay { PointerDragSurface(clicked: openDetails, dragged: dragChanged, ended: dragEnded).accessibilityHidden(true) }
@@ -183,6 +180,27 @@ struct EdgeTabView: View {
         QuotaPeriod.allCases.map { period in
             "\(store.window(period)?.title ?? period.fallbackTitle)剩余 \(store.window(period)?.percentText ?? "未知")"
         }.joined(separator: "，")
+    }
+}
+
+struct EdgeSlideReadout: View {
+    let window: QuotaWindow?
+    var stale = false
+    var warning = false
+    var activityPhase: HarnessPhase = .idle
+    var animateActivity = false
+    let edge: DockEdge
+    let progress: Double
+    private var width: CGFloat { EdgeDockGeometry.handleSize.width + (EdgeDockGeometry.tabSize.width - EdgeDockGeometry.handleSize.width) * progress }
+    var body: some View {
+        ZStack(alignment: edge == .left ? .leading : .trailing) {
+            EdgeTabReadout(window: window, stale: stale, warning: warning,
+                           activityPhase: activityPhase, animateActivity: animateActivity && progress > 0.01)
+                .frame(width: width, alignment: edge == .left ? .trailing : .leading)
+                .offset(x: (edge == .left ? -1 : 1) * EdgeDockGeometry.handleSize.width * (1 - progress))
+                .opacity(min(1, progress * 1.4))
+            EdgeHandleReadout(window: window, stale: stale).opacity(max(0, 1 - progress * 2))
+        }.frame(width: width, height: EdgeDockGeometry.tabSize.height).clipped()
     }
 }
 

@@ -35,6 +35,9 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var hoverDismissedUntilExit = false
     private var updatingEdgeVisibility = false
     private var edgeTestPointer: NSPoint?
+    private let edgeSlide = EdgeSlideAnimator()
+    private var animateEdgeDuringTest = false
+    private var reducedEdgeMotionForTest: Bool?
     private var detailsPanel: DetailsPanel?
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
@@ -48,7 +51,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private enum DragSource { case orb, capsule }
     private var dragStart: (mouse: NSPoint, origin: NSPoint, source: DragSource)?
     private var menu: NSMenu?
-    private var isSmokeTest: Bool { ProcessInfo.processInfo.arguments.contains("--smoke-test") || ProcessInfo.processInfo.arguments.contains("--edge-self-test") || ProcessInfo.processInfo.arguments.contains("--hud-self-test") || ProcessInfo.processInfo.arguments.contains("--approval-self-test") || ProcessInfo.processInfo.arguments.contains("--activity-self-test") }
+    private var isSmokeTest: Bool { ProcessInfo.processInfo.arguments.contains("--smoke-test") || ProcessInfo.processInfo.arguments.contains("--edge-self-test") || ProcessInfo.processInfo.arguments.contains("--edge-animation-self-test") || ProcessInfo.processInfo.arguments.contains("--hud-self-test") || ProcessInfo.processInfo.arguments.contains("--approval-self-test") || ProcessInfo.processInfo.arguments.contains("--activity-self-test") }
     private var isDiagnostic: Bool { ProcessInfo.processInfo.arguments.contains("--diagnose") }
     private var previousScale: Double = 1
     private var previousAppearance = ""
@@ -83,19 +86,19 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }.store(in: &subscriptions)
         let workspace = NSWorkspace.shared.notificationCenter
         workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.store.sleep(); self?.dashboard.stop(); self?.hideDetails(); self?.quotaHUD.dismiss(); self?.approvalBridge.releaseAll(); self?.updateApprovalPanels() }
+            Task { @MainActor in self?.store.sleep(); self?.dashboard.stop(); self?.hideDetails(); self?.stopEdgeMotionForSleep(); self?.quotaHUD.dismiss(); self?.approvalBridge.releaseAll(); self?.updateApprovalPanels() }
         })
         workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.store.wake() }
         })
         workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.displaySleeping = true; self?.updateStatusItem(); self?.quotaHUD.dismiss(); self?.approvalBridge.releaseAll(); self?.updateApprovalPanels() }
+            Task { @MainActor in self?.displaySleeping = true; self?.stopEdgeMotionForSleep(); self?.updateStatusItem(); self?.quotaHUD.dismiss(); self?.approvalBridge.releaseAll(); self?.updateApprovalPanels() }
         })
         workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.displaySleeping = false; self?.updateStatusItem() }
         })
         workspaceObservers.append(workspace.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.updateStatusItem() }
+            Task { @MainActor in self?.updateStatusItem(); self?.collapseOrb() }
         })
         localObservers.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.keepOrbOnScreen(); self?.updateEdgeVisibility(); self?.updateQuotaHUD() }
@@ -123,6 +126,8 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             Task { await approvalSelfTest(report: URL(fileURLWithPath: report)) }
         } else if let report = argument(after: "--hud-self-test") {
             Task { await hudSelfTest(report: URL(fileURLWithPath: report)) }
+        } else if let report = argument(after: "--edge-animation-self-test") {
+            Task { await edgeAnimationSelfTest(report: URL(fileURLWithPath: report)) }
         } else if let report = argument(after: "--edge-self-test") {
             Task { await edgeSelfTest(report: URL(fileURLWithPath: report)) }
         } else if isSmokeTest {
@@ -172,6 +177,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        edgeSlide.stop()
         approvalBridge.stop()
         dashboard.stop()
         savePosition()
@@ -365,6 +371,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func expandOrb() {
+        edgeSlide.stop()
         hideHoverDetails()
         cancelCollapse()
         edgePanel?.orderOut(nil)
@@ -375,21 +382,48 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if wasCollapsed || orbPanel?.isVisible != true { orbPanel?.orderFrontRegardless() }
     }
 
+    private func stopEdgeMotionForSleep() {
+        edgeSlide.stop()
+        hideHoverDetails()
+        edgeState.isTucked = true
+        collapseOrb()
+    }
+
     private func collapseOrb(pointer _: NSPoint? = nil) {
         dockOrbIfNeeded()
         guard preferences.showOrb, preferences.autoHideAtEdge, dragStart == nil,
               let geometry = edgeGeometry(), let panel = orbPanel, let edgePanel else { return }
         if edgeState.edge != geometry.edge { edgeState.edge = geometry.edge }
-        let frame: NSRect
-        if edgeState.isTucked, let screen = bestScreen(for: panel.frame) {
-            frame = EdgeDockGeometry.handleFrame(edge: geometry.edge, visible: dockArea(for: screen), expanded: panel.frame)
-        } else { frame = geometry.tab }
-        if edgePanel.frame != frame { edgePanel.setFrame(frame, display: true) }
-        if edgePanel.contentView?.bounds.size != frame.size { edgePanel.contentView?.setBoundsSize(frame.size) }
+        let animated = (!isSmokeTest || animateEdgeDuringTest) && edgePanel.isVisible &&
+            !store.isSleeping && !displaySleeping && !(reducedEdgeMotionForTest ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        if edgeProtection.holdsExpanded {
+            edgeSlide.stop()
+            layoutEdgePanel(progress: edgeState.revealProgress)
+        } else {
+            edgeSlide.move(from: edgeState.revealProgress, to: edgeState.isTucked ? 0 : 1, animated: animated) { [weak self] progress in
+                self?.layoutEdgePanel(progress: progress)
+            }
+        }
         edgePanel.alphaValue = preferences.opacity
         edgeState.isCollapsed = true
         if !edgePanel.isVisible { edgePanel.orderFrontRegardless() }
         panel.orderOut(nil)
+    }
+
+    private func layoutEdgePanel(progress: Double) {
+        guard preferences.showOrb, preferences.autoHideAtEdge, let geometry = edgeGeometry(), let edgePanel else { edgeSlide.stop(); return }
+        let wasUpdating = updatingEdgeVisibility
+        updatingEdgeVisibility = true
+        defer { updatingEdgeVisibility = wasUpdating }
+        let frame = EdgeDockGeometry.slideFrame(edge: geometry.edge, tab: geometry.tab, progress: progress)
+        if edgeState.revealProgress != progress { edgeState.revealProgress = progress }
+        if edgePanel.frame != frame { edgePanel.setFrame(frame, display: true) }
+        if edgePanel.contentView?.bounds.size != frame.size { edgePanel.contentView?.setBoundsSize(frame.size) }
+        if let popup = hoverDetailsPanel, popup.isVisible {
+            popup.alphaValue = progress
+            if progress == 0 && edgeState.isTucked { popup.orderOut(nil); popup.alphaValue = 1 }
+        }
+        if progress == 0 || progress == 1 { updateApprovalPanels(); updateQuotaHUD() }
     }
 
     private func showHoverDetails(force: Bool = false) {
@@ -419,6 +453,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         let frame = EdgeDockGeometry.detailsFrame(edge: geometry.edge, visible: visible, tab: geometry.tab)
         if hoverDetailsPanel?.frame != frame { hoverDetailsPanel?.setFrame(frame, display: true) }
+        hoverDetailsPanel?.alphaValue = edgeState.revealProgress
         if hoverDetailsPanel?.isVisible != true { hoverDetailsPanel?.orderFrontRegardless() }
         if !isSmokeTest, !wasVisible { Task { await refreshDashboardData() } }
         if !isSmokeTest, !wasVisible, (store.snapshot == nil || store.isStale), Date() >= store.nextRefreshAt { Task { await store.refresh() } }
@@ -452,7 +487,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard !edgeProtection.holdsExpanded, let tab = edgePanel?.frame, edgeGeometry() != nil else { return }
         let details = hoverDetailsPanel?.isVisible == true ? hoverDetailsPanel?.frame : nil
         guard !EdgeDockGeometry.pointerIsInsideSidebar(pointer ?? edgeTestPointer ?? NSEvent.mouseLocation, tab: tab, details: details) else { cancelCollapse(); return }
-        hideHoverDetails()
+        cancelCollapse()
         edgeState.isTucked = true
         collapseOrb()
         updateApprovalPanels(); updateQuotaHUD()
@@ -467,8 +502,10 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if argument(after: "--edge-self-test") != nil, let pointer { edgeTestPointer = pointer }
         guard !store.isSleeping else { hideHoverDetails(); return }
         guard preferences.showOrb else {
+            edgeSlide.stop()
             hideHoverDetails(); hoverDismissedUntilExit = false
             edgeState.isTucked = true
+            edgeState.revealProgress = 0
             edgePanel?.orderOut(nil); orbPanel?.orderOut(nil)
             return
         }
@@ -490,7 +527,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let activeTab = edgePanel?.frame ?? geometry.tab
         let inside = EdgeDockGeometry.pointerIsInsideSidebar(point, tab: activeTab, details: details)
         if !inside { hoverDismissedUntilExit = false }
-        if activeTab.insetBy(dx: -2, dy: -3).contains(point) {
+        if activeTab.insetBy(dx: -2, dy: -3).contains(point) || (inside && edgeState.isTucked) {
             showHoverDetails()
         } else if !edgeState.isTucked {
             if inside { cancelCollapse() }
@@ -509,6 +546,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard let panel = source == .capsule ? edgePanel : orbPanel else { return }
         if dragStart == nil {
             guard panel.isVisible else { return }
+            edgeSlide.stop()
             dragStart = (start, panel.frame.origin, source)
             hideDetails()
         }
@@ -993,6 +1031,94 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         exit(results.count == 34 && results.values.allSatisfy({ $0 }) ? 0 : 1)
     }
 
+    private func edgeAnimationSelfTest(report url: URL) async {
+        let previous = (preferences.showOrb, preferences.autoHideAtEdge, preferences.snapToEdge)
+        preferences.showOrb = true; preferences.autoHideAtEdge = true; preferences.snapToEdge = true
+        positionOnMainScreen()
+        let outside = NSPoint(x: NSScreen.main?.visibleFrame.midX ?? 0, y: NSScreen.main?.visibleFrame.midY ?? 0)
+        edgeTestPointer = outside
+        applyPreferences()
+        animateEdgeDuringTest = true; reducedEdgeMotionForTest = false
+        edgeState.isTucked = true; collapseOrb()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        var checks: [String: Bool] = [:]
+        if let frame = edgePanel?.frame { edgeTestPointer = NSPoint(x: frame.midX, y: frame.midY) }
+        showHoverDetails(force: true)
+        checks["expandStartsWithoutJump"] = edgeSlide.isRunning && edgePanel?.frame.width == 12
+        try? await Task.sleep(nanoseconds: 75_000_000)
+        let openWidth = edgePanel?.frame.width ?? 0
+        checks["expandHasIntermediateFrames"] = openWidth > 12 && openWidth < 108
+        exportView(edgePanel?.contentView, to: url.deletingLastPathComponent().appendingPathComponent("edge-slide-midpoint.png"))
+        try? await Task.sleep(nanoseconds: 260_000_000)
+        checks["expandCompletesAtExactFrame"] = !edgeSlide.isRunning && edgePanel?.frame.width == 108 && hoverDetailsPanel?.alphaValue == 1
+        let full = edgePanel?.frame
+        edgeTestPointer = outside
+        dismissHoverDetailsIfOutside(pointer: outside)
+        checks["collapseStartsWithoutJump"] = edgeSlide.isRunning && edgePanel?.frame == full
+        try? await Task.sleep(nanoseconds: 75_000_000)
+        let closing = edgePanel?.frame ?? .zero
+        checks["collapseSlidesAndFadesDashboard"] = closing.width > 12 && closing.width < 108 && (hoverDetailsPanel?.alphaValue ?? 1) < 1 && (hoverDetailsPanel?.alphaValue ?? 0) > 0
+        let entry = NSPoint(x: closing.midX, y: closing.midY)
+        edgeTestPointer = entry
+        updateEdgeVisibility(pointer: entry)
+        checks["reentryReversesWithoutPositionJump"] = !edgeState.isTucked && edgePanel?.frame == closing
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        checks["reentryFinishesExpanded"] = !edgeSlide.isRunning && edgePanel?.frame.width == 108 && hoverDetailsPanel?.isVisible == true
+        edgeTestPointer = outside
+        dismissHoverDetailsIfOutside(pointer: outside)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        trackingMenu = true; updateEdgeVisibility(pointer: outside)
+        let heldFrame = edgePanel?.frame
+        try? await Task.sleep(nanoseconds: 75_000_000)
+        checks["contextMenuPausesSlide"] = !edgeSlide.isRunning && edgePanel?.frame == heldFrame
+        trackingMenu = false
+        reducedEdgeMotionForTest = true
+        edgeState.isTucked = true; collapseOrb()
+        checks["reduceMotionSkipsSlide"] = !edgeSlide.isRunning && edgePanel?.frame.width == 12 && hoverDetailsPanel?.isVisible == false
+        reducedEdgeMotionForTest = false
+        edgeTestPointer = outside
+        showHoverDetails(force: true)
+        try? await Task.sleep(nanoseconds: 70_000_000)
+        if let frame = edgePanel?.frame {
+            let press = NSPoint(x: frame.midX, y: frame.midY)
+            dragOrb(from: .capsule, start: press, to: NSPoint(x: press.x - 10, y: press.y + 10))
+            let width = edgePanel?.frame.width
+            try? await Task.sleep(nanoseconds: 70_000_000)
+            checks["dragStopsSlideAtCurrentSize"] = !edgeSlide.isRunning && dragStart != nil && edgePanel?.frame.width == width
+            finishDrag()
+        }
+        preferences.showOrb = false; applyPreferences()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        checks["hiddenWindowCannotBeResurrectedByTimer"] = !edgeSlide.isRunning && edgePanel?.isVisible == false && edgeState.revealProgress == 0
+        animateEdgeDuringTest = false; reducedEdgeMotionForTest = nil; edgeSlide.stop()
+        var images: [CGImage] = []
+        let motion = (0...11).map { EdgeDockGeometry.slideEase(Double($0) / 11) }
+        let phases = [Double](repeating: 0, count: 10) + motion + [Double](repeating: 1, count: 18) + motion.map { 1 - $0 } + [Double](repeating: 0, count: 10)
+        let sample = QuotaWindow(usedPercent: 35, windowDurationMins: 300, resetsAt: Date().addingTimeInterval(3600).timeIntervalSince1970)
+        for phase in phases {
+            let root = ZStack(alignment: .trailing) {
+                Color(red: 0.08, green: 0.105, blue: 0.12)
+                EdgeSlideReadout(window: sample, edge: .right, progress: phase)
+            }.frame(width: 108, height: 56).clipped().preferredColorScheme(.dark)
+            let view = NSHostingView(rootView: root)
+            view.sizingOptions = []; view.frame = NSRect(x: 0, y: 0, width: 108, height: 56)
+            view.layoutSubtreeIfNeeded()
+            if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                if let image = bitmap.cgImage { images.append(image) }
+            }
+        }
+        if let gif = CGImageDestinationCreateWithURL(url.deletingLastPathComponent().appendingPathComponent("edge-slide-preview.gif") as CFURL, "com.compuserve.gif" as CFString, images.count, nil) {
+            CGImageDestinationSetProperties(gif, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
+            for frame in images { CGImageDestinationAddImage(gif, frame, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.02]] as CFDictionary) }
+            checks["slidePreviewExported"] = images.count == phases.count && CGImageDestinationFinalize(gif)
+        }
+        preferences.showOrb = previous.0; preferences.autoHideAtEdge = previous.1; preferences.snapToEdge = previous.2
+        if let data = try? JSONSerialization.data(withJSONObject: checks, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: url) }
+        print("Edge animation checks: \(checks)")
+        exit(checks.count == 12 && checks.values.allSatisfy({ $0 }) ? 0 : 1)
+    }
+
     private func activitySelfTest(report url: URL) async {
         let state = HarnessActivityStore()
         let now = Date()
@@ -1267,6 +1393,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if let geometry = edgeGeometry() {
             edgeState.edge = geometry.edge
             edgeState.isTucked = false
+            layoutEdgePanel(progress: 1)
             edgePanel?.setFrame(geometry.tab, display: true)
             edgePanel?.contentView?.setBoundsSize(EdgeDockGeometry.tabSize)
             exportView(edgePanel?.contentView, to: dir.appendingPathComponent("edge-tab.png"))
