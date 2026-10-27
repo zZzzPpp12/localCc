@@ -7,6 +7,7 @@ enum DockEdge: String, Codable { case left, right }
 enum EdgeDockGeometry {
     static let inset: CGFloat = 4
     static let tabSize = CGSize(width: 108, height: 56)
+    static let handleSize = CGSize(width: 12, height: 56)
     static let detailsSize = CGSize(width: 372, height: 420)
     static let detailsGap: CGFloat = 6
 
@@ -47,6 +48,12 @@ enum EdgeDockGeometry {
                       width: detailsSize.width, height: detailsSize.height)
     }
 
+    static func handleFrame(edge: DockEdge, visible: CGRect, expanded: CGRect) -> CGRect {
+        let tab = tabFrame(edge: edge, visible: visible, expanded: expanded, scale: 1)
+        return CGRect(x: edge == .left ? visible.minX : visible.maxX - handleSize.width,
+                      y: tab.minY, width: handleSize.width, height: handleSize.height)
+    }
+
     static func pointerIsInsideSidebar(_ point: CGPoint, tab: CGRect, details: CGRect?) -> Bool {
         if tab.insetBy(dx: -2, dy: -3).contains(point) { return true }
         guard let details else { return false }
@@ -71,4 +78,5 @@ struct EdgeDockProtection {
 final class EdgeDockState: ObservableObject {
     @Published var edge: DockEdge = .right
     @Published var isCollapsed = false
+    @Published var isTucked = true
 }

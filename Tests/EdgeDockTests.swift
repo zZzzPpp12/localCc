@@ -21,6 +21,18 @@ struct EdgeDockTests {
         let tab = EdgeDockGeometry.tabFrame(edge: .right, visible: visible, expanded: right, scale: 1)
         check(visible.contains(tab), "collapsed tab fully visible")
         check(tab.maxX == visible.maxX && tab.width == 108 && tab.height == 56, "compact AI quota row attaches flush to edge")
+        for work in [visible, CGRect(x: -2560, y: -100, width: 2560, height: 1400)] {
+            for edge in [DockEdge.left, .right] {
+                let anchor = EdgeDockGeometry.expandedFrame(edge: edge, visible: work, size: size, centerY: work.midY, compact: true)
+                let handle = EdgeDockGeometry.handleFrame(edge: edge, visible: work, expanded: anchor)
+                let revealed = EdgeDockGeometry.tabFrame(edge: edge, visible: work, expanded: anchor, scale: 1)
+                check(work.contains(handle) && handle.size == EdgeDockGeometry.handleSize, "hidden entry stays entirely on its own display")
+                check(edge == .left ? handle.minX == work.minX : handle.maxX == work.maxX, "hidden entry is flush with physical display edge")
+                check(handle.midY == revealed.midY && handle.width < revealed.width, "reveal preserves height and reduces desktop footprint while hidden")
+                let dormant = CGPoint(x: edge == .left ? revealed.maxX - 5 : revealed.minX + 5, y: revealed.midY)
+                check(!EdgeDockGeometry.pointerIsInsideSidebar(dormant, tab: handle, details: nil), "hidden capsule does not intercept empty former area")
+            }
+        }
         let popup = EdgeDockGeometry.detailsFrame(edge: .right, visible: visible, tab: tab)
         check(visible.contains(popup) && popup.maxX < tab.minX, "right dock opens details on its inner left side")
         check(EdgeDockGeometry.pointerIsInsideSidebar(CGPoint(x: visible.maxX - 1, y: tab.midY), tab: tab, details: popup), "pointer on capsule keeps details open")

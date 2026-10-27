@@ -33,6 +33,8 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var trackingMenu = false
     private var hoverDetailsPanel: FloatingPanel?
     private var hoverDismissedUntilExit = false
+    private var updatingEdgeVisibility = false
+    private var edgeTestPointer: NSPoint?
     private var detailsPanel: DetailsPanel?
     private var settingsWindow: NSWindow?
     private var statusItem: NSStatusItem?
@@ -282,7 +284,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let previousFrame = panel.frame
             let size = NSSize(width: 164 * preferences.scale, height: 176 * preferences.scale)
             var frame = NSRect(origin: previousFrame.origin, size: size)
-            if let visible = bestScreen(for: previousFrame)?.visibleFrame,
+            if let visible = bestScreen(for: previousFrame).map({ preferences.autoHideAtEdge ? dockArea(for: $0) : $0.visibleFrame }),
                let edge = EdgeDockGeometry.edge(of: previousFrame, in: visible) {
                 frame = EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: size, centerY: previousFrame.midY, compact: preferences.autoHideAtEdge)
             }
@@ -319,9 +321,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         panel.title = "Codex Orbit 侧边标签"
         panel.hasShadow = false
         let hosting = NSHostingView(rootView: EdgeTabView(store: store, activity: activity, state: edgeState,
-            hoverChanged: { [weak self] inside in
-                if inside { self?.showHoverDetails() } else { self?.updateEdgeVisibility() }
-            },
+            hoverChanged: { [weak self] _ in self?.updateEdgeVisibility() },
             openDetails: { [weak self] in self?.showHoverDetails(force: true) },
             openSettings: { [weak self] in self?.openSettings() },
             dragChanged: { [weak self] start, point in self?.dragOrb(from: .capsule, start: start, to: point) },
@@ -342,13 +342,13 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private var edgeProtection: EdgeDockProtection {
         EdgeDockProtection(dragging: dragStart != nil,
-                           showingDetails: detailsPanel?.isVisible == true,
+                           showingDetails: detailsPanel?.isVisible == true || approvalPanels.isExpanded,
                            showingSettings: settingsWindow?.isVisible == true,
                            trackingMenu: trackingMenu)
     }
 
     private func edgeGeometry() -> (edge: DockEdge, tab: NSRect)? {
-        guard let panel = orbPanel, let visible = bestScreen(for: panel.frame)?.visibleFrame,
+        guard let panel = orbPanel, let visible = bestScreen(for: panel.frame).map({ dockArea(for: $0) }),
               let edge = EdgeDockGeometry.edge(of: panel.frame, in: visible) else { return nil }
         return (edge, EdgeDockGeometry.tabFrame(edge: edge, visible: visible, expanded: panel.frame, scale: preferences.scale))
     }
@@ -358,7 +358,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private func dockOrbIfNeeded() {
         guard preferences.showOrb, preferences.autoHideAtEdge, preferences.snapToEdge, !edgeProtection.holdsExpanded,
               edgeGeometry() == nil, let panel = orbPanel,
-              let visible = bestScreen(for: panel.frame)?.visibleFrame else { return }
+              let visible = bestScreen(for: panel.frame).map({ dockArea(for: $0) }) else { return }
         let edge = EdgeDockGeometry.nearestEdge(of: panel.frame, in: visible)
         panel.setFrame(EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: panel.frame.size, centerY: panel.frame.midY, compact: true), display: true)
         savePosition()
@@ -380,8 +380,12 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard preferences.showOrb, preferences.autoHideAtEdge, dragStart == nil,
               let geometry = edgeGeometry(), let panel = orbPanel, let edgePanel else { return }
         if edgeState.edge != geometry.edge { edgeState.edge = geometry.edge }
-        if edgePanel.frame != geometry.tab { edgePanel.setFrame(geometry.tab, display: true) }
-        if edgePanel.contentView?.bounds.size != EdgeDockGeometry.tabSize { edgePanel.contentView?.setBoundsSize(EdgeDockGeometry.tabSize) }
+        let frame: NSRect
+        if edgeState.isTucked, let screen = bestScreen(for: panel.frame) {
+            frame = EdgeDockGeometry.handleFrame(edge: geometry.edge, visible: dockArea(for: screen), expanded: panel.frame)
+        } else { frame = geometry.tab }
+        if edgePanel.frame != frame { edgePanel.setFrame(frame, display: true) }
+        if edgePanel.contentView?.bounds.size != frame.size { edgePanel.contentView?.setBoundsSize(frame.size) }
         edgePanel.alphaValue = preferences.opacity
         edgeState.isCollapsed = true
         if !edgePanel.isVisible { edgePanel.orderFrontRegardless() }
@@ -390,6 +394,8 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private func showHoverDetails(force: Bool = false) {
         if force { hoverDismissedUntilExit = false }
+        guard preferences.showOrb, preferences.autoHideAtEdge, dragStart == nil, edgeGeometry() != nil else { return }
+        if edgeState.isTucked { edgeState.isTucked = false; collapseOrb() }
         guard !approvalPanels.isExpanded, !hoverDismissedUntilExit, preferences.showOrb, preferences.autoHideAtEdge,
               !edgeProtection.holdsExpanded, let geometry = edgeGeometry(),
               let visible = bestScreen(for: geometry.tab)?.visibleFrame else { return }
@@ -443,15 +449,26 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func dismissHoverDetailsIfOutside(pointer: NSPoint? = nil) {
-        guard hoverDetailsPanel?.isVisible == true, let geometry = edgeGeometry() else { hideHoverDetails(); return }
-        guard !EdgeDockGeometry.pointerIsInsideSidebar(pointer ?? NSEvent.mouseLocation, tab: geometry.tab, details: hoverDetailsPanel?.frame) else { cancelCollapse(); return }
+        guard !edgeProtection.holdsExpanded, let tab = edgePanel?.frame, edgeGeometry() != nil else { return }
+        let details = hoverDetailsPanel?.isVisible == true ? hoverDetailsPanel?.frame : nil
+        guard !EdgeDockGeometry.pointerIsInsideSidebar(pointer ?? edgeTestPointer ?? NSEvent.mouseLocation, tab: tab, details: details) else { cancelCollapse(); return }
         hideHoverDetails()
+        edgeState.isTucked = true
+        collapseOrb()
+        updateApprovalPanels(); updateQuotaHUD()
     }
 
     private func updateEdgeVisibility(pointer: NSPoint? = nil) {
+        // Frame changes can synchronously emit tracking-area callbacks. Finish
+        // one transition before handling the next hover notification.
+        guard !updatingEdgeVisibility else { return }
+        updatingEdgeVisibility = true
+        defer { updatingEdgeVisibility = false }
+        if argument(after: "--edge-self-test") != nil, let pointer { edgeTestPointer = pointer }
         guard !store.isSleeping else { hideHoverDetails(); return }
         guard preferences.showOrb else {
             hideHoverDetails(); hoverDismissedUntilExit = false
+            edgeState.isTucked = true
             edgePanel?.orderOut(nil); orbPanel?.orderOut(nil)
             return
         }
@@ -468,13 +485,14 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             if hoverDetailsPanel?.frame != frame { hoverDetailsPanel?.setFrame(frame, display: true) }
         }
         if edgeProtection.holdsExpanded { cancelCollapse(); return }
-        let point = pointer ?? NSEvent.mouseLocation
+        let point = pointer ?? edgeTestPointer ?? NSEvent.mouseLocation
         let details = hoverDetailsPanel?.isVisible == true ? hoverDetailsPanel?.frame : nil
-        let inside = EdgeDockGeometry.pointerIsInsideSidebar(point, tab: geometry.tab, details: details)
+        let activeTab = edgePanel?.frame ?? geometry.tab
+        let inside = EdgeDockGeometry.pointerIsInsideSidebar(point, tab: activeTab, details: details)
         if !inside { hoverDismissedUntilExit = false }
-        if geometry.tab.insetBy(dx: -2, dy: -3).contains(point) {
+        if activeTab.insetBy(dx: -2, dy: -3).contains(point) {
             showHoverDetails()
-        } else if hoverDetailsPanel?.isVisible == true {
+        } else if !edgeState.isTucked {
             if inside { cancelCollapse() }
             else if collapseTask == nil {
                 let pointerOverride = pointer
@@ -510,13 +528,14 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard let panel = orbPanel else { return }
         let footprint = start.source == .capsule ? (edgePanel?.frame ?? panel.frame) : panel.frame
         let screen = bestScreen(for: footprint)
-        if preferences.snapToEdge, let visible = screen?.visibleFrame {
+        if preferences.snapToEdge, let visible = screen.map({ dockArea(for: $0) }) {
             let edge = EdgeDockGeometry.nearestEdge(of: footprint, in: visible)
             panel.setFrame(EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: panel.frame.size,
                                                          centerY: footprint.midY, compact: preferences.autoHideAtEdge), display: true)
         } else { keepOrbOnScreen() }
         savePosition()
         hoverDismissedUntilExit = true
+        edgeState.isTucked = false
         updateEdgeVisibility()
         updateApprovalPanels(); updateQuotaHUD()
     }
@@ -526,6 +545,13 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let ia = a.visibleFrame.intersection(rect), ib = b.visibleFrame.intersection(rect)
             return max(0, ia.width) * max(0, ia.height) < max(0, ib.width) * max(0, ib.height)
         }
+    }
+
+    private func dockArea(for screen: NSScreen) -> NSRect {
+        // Use the physical display edges even when the Dock occupies one side;
+        // retain the work area's vertical safety margins for menu bar and Dock.
+        NSRect(x: screen.frame.minX, y: screen.visibleFrame.minY,
+               width: screen.frame.width, height: screen.visibleFrame.height)
     }
 
     private func positionOnMainScreen() {
@@ -544,7 +570,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard let panel = orbPanel else { return }
         guard let screen = bestScreen(for: panel.frame) else { return }
         var frame = panel.frame
-        let visible = screen.visibleFrame
+        let visible = allowCompact && preferences.autoHideAtEdge ? dockArea(for: screen) : screen.visibleFrame
         if frame.intersection(visible).isEmpty { positionOnMainScreen(); return }
         if allowCompact, preferences.autoHideAtEdge, let edge = EdgeDockGeometry.edge(of: frame, in: visible) {
             frame = EdgeDockGeometry.expandedFrame(edge: edge, visible: visible, size: frame.size, centerY: frame.midY, compact: true)
@@ -703,7 +729,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func diagnosticObject() -> [String: Any] {
-        var result: [String: Any] = ["application": "Codex Orbit", "version": "0.8.1", "status": store.statusText, "cliDetected": store.cliPath != nil]
+        var result: [String: Any] = ["application": "Codex Orbit", "version": "0.8.2", "status": store.statusText, "cliDetected": store.cliPath != nil]
         if let error = store.lastError { result["error"] = error }
         if let snapshot = store.snapshot {
             result["accountType"] = snapshot.account.type
@@ -755,7 +781,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let notifications = await UNUserNotificationCenter.current().notificationSettings()
         let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
         let geometry = edgeGeometry()
-        let report: [String: Any] = ["bundlePath": Bundle.main.bundleURL.path, "version": "0.8.1",
+        let report: [String: Any] = ["bundlePath": Bundle.main.bundleURL.path, "version": "0.8.2",
                                    "loginItemStatus": launchAtLogin.statusCode,
                                    "loginItemEnabled": launchAtLogin.isEnabled,
                                    "autoHideAtEdge": preferences.autoHideAtEdge,
@@ -763,6 +789,8 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                                    "showOrb": preferences.showOrb,
                                    "sidePanelVisible": edgePanel?.isVisible == true,
                                    "sidePanelCollapsed": edgeState.isCollapsed,
+                                   "sidePanelTucked": edgeState.isTucked,
+                                   "sidePanelFrame": edgePanel.map { NSStringFromRect($0.frame) } ?? "none",
                                    "dockEdge": geometry?.edge.rawValue ?? "none",
                                    "expandedFrame": orbPanel.map { NSStringFromRect($0.frame) } ?? "none",
                                    "interactionProtectsExpansion": edgeProtection.holdsExpanded,
@@ -770,7 +798,9 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                                    "hoverDetailsVisible": hoverDetailsPanel?.isVisible == true,
                                    "orbVisible": orbPanel?.isVisible == true,
                                    "hoverDashboardSize": [EdgeDockGeometry.detailsSize.width, EdgeDockGeometry.detailsSize.height],
-                                   "sidePanelSize": [EdgeDockGeometry.tabSize.width, EdgeDockGeometry.tabSize.height],
+                                   "sidePanelSize": [edgePanel?.frame.width ?? 0, edgePanel?.frame.height ?? 0],
+                                   "sidePanelExpandedSize": [EdgeDockGeometry.tabSize.width, EdgeDockGeometry.tabSize.height],
+                                   "sidePanelHiddenSize": [EdgeDockGeometry.handleSize.width, EdgeDockGeometry.handleSize.height],
                                    "sidePanelProvider": "codex",
                                    "sidePanelLayout": "compact-provider-row",
                                    "providerIconLoaded": ProviderArtwork.codex != nil,
@@ -807,7 +837,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         positionOnMainScreen()
         var results: [String: Bool] = [:]
         let outside = NSPoint(x: NSScreen.main?.visibleFrame.midX ?? 0, y: NSScreen.main?.visibleFrame.midY ?? 0)
-        if let panel = orbPanel, let visible = bestScreen(for: panel.frame)?.visibleFrame {
+        if let panel = orbPanel, let visible = bestScreen(for: panel.frame).map({ dockArea(for: $0) }) {
             let free = NSRect(x: visible.midX - panel.frame.width / 2, y: visible.midY - panel.frame.height / 2, width: panel.frame.width, height: panel.frame.height)
             expandOrb()
             preferences.snapToEdge = false
@@ -825,11 +855,14 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         collapseOrb(pointer: outside)
         results["collapsedLeavesVisibleTab"] = edgeState.isCollapsed && edgePanel?.isVisible == true && orbPanel?.isVisible == false
-        if let rect = edgeGeometry()?.tab {
-            let capsulePoint = NSPoint(x: rect.midX, y: rect.midY)
+        results["idleSidebarUsesNarrowHandle"] = edgeState.isTucked && edgePanel?.frame.size == EdgeDockGeometry.handleSize
+        if let rect = edgeGeometry()?.tab, let handle = edgePanel?.frame {
+            updateEdgeVisibility(pointer: NSPoint(x: rect.midX, y: rect.midY))
+            results["emptyFormerCapsuleAreaDoesNotReveal"] = edgeState.isTucked && hoverDetailsPanel?.isVisible != true
+            let capsulePoint = NSPoint(x: handle.midX, y: handle.midY)
             updateEdgeVisibility(pointer: capsulePoint)
             results["hoverShowsDetailsWithoutOrb"] = hoverDetailsPanel?.isVisible == true && edgePanel?.isVisible == true && orbPanel?.isVisible == false
-            results["capsuleFrameStaysFixedOnHover"] = edgePanel?.frame == rect
+            results["revealKeepsEdgeAndHeight"] = !edgeState.isTucked && edgePanel?.frame == rect
             if let popup = hoverDetailsPanel?.frame {
                 updateEdgeVisibility(pointer: NSPoint(x: popup.midX, y: popup.midY))
                 results["pointerInsideDetailsKeepsThemOpen"] = hoverDetailsPanel?.isVisible == true && collapseTask == nil
@@ -840,6 +873,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             results["leavingBothSchedulesDismissal"] = collapseTask != nil
             try? await Task.sleep(nanoseconds: 450_000_000)
             results["leavingBothClosesOnlyDetails"] = hoverDetailsPanel?.isVisible == false && edgePanel?.isVisible == true && orbPanel?.isVisible == false
+            results["leavingBothTucksFullCapsule"] = edgeState.isTucked && edgePanel?.frame.size == EdgeDockGeometry.handleSize
             showHoverDetails(force: true)
             hideHoverDetails(manually: true)
             updateEdgeVisibility(pointer: capsulePoint)
@@ -847,6 +881,10 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             updateEdgeVisibility(pointer: outside)
             updateEdgeVisibility(pointer: capsulePoint)
             results["reentryReopensDetails"] = hoverDetailsPanel?.isVisible == true
+            hideHoverDetails(manually: true)
+            updateEdgeVisibility(pointer: outside)
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            results["manualDashboardCloseStillAllowsAutoHide"] = edgeState.isTucked && hoverDetailsPanel?.isVisible == false && edgePanel?.frame.size == EdgeDockGeometry.handleSize
         }
         preferences.showOrb = false
         applyPreferences()
@@ -864,7 +902,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         results["fullDetailsKeepCapsuleAndHideOrb"] = edgePanel?.isVisible == true && orbPanel?.isVisible == false && detailsPanel?.isVisible == true
         hideDetails()
         updateEdgeVisibility(pointer: outside)
-        if let rect = edgePanel?.frame, let visible = bestScreen(for: orbPanel?.frame ?? .zero)?.visibleFrame {
+        if let rect = edgePanel?.frame, let visible = bestScreen(for: orbPanel?.frame ?? .zero).map({ dockArea(for: $0) }) {
             results["tabStaysOnScreen"] = visible.contains(rect)
         }
         for scale in [0.8, 1.0, 1.35] {
@@ -878,6 +916,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         preferences.scale = oldScale
         applyPreferences()
+        showHoverDetails(force: true)
         // Exercise the actual NSView mouse handlers directly, without posting
         // synthetic events into the OS or moving the user's pointer.
         func dragSurface(_ view: NSView?) -> PointerDragView? {
@@ -890,7 +929,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                               timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                               context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
         }
-        if let panel = edgePanel, let visible = bestScreen(for: panel.frame)?.visibleFrame {
+        if let panel = edgePanel, let visible = bestScreen(for: panel.frame).map({ dockArea(for: $0) }) {
             panel.contentView?.layoutSubtreeIfNeeded()
             if let surface = dragSurface(panel.contentView) {
                 let initial = panel.frame, press = NSPoint(x: panel.frame.midX, y: panel.frame.midY)
@@ -941,6 +980,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             applyPreferences()
         }
         positionOnMainScreen()
+        edgeState.isTucked = true
         collapseOrb(pointer: outside)
         try? await Task.sleep(nanoseconds: 250_000_000)
         exportView(edgePanel?.contentView, to: url.deletingLastPathComponent().appendingPathComponent("edge-tab-test.png"))
@@ -950,7 +990,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if let data = try? JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: url) }
         print("Edge UI checks: \(results)")
         store.stop()
-        exit(results.count == 30 && results.values.allSatisfy({ $0 }) ? 0 : 1)
+        exit(results.count == 34 && results.values.allSatisfy({ $0 }) ? 0 : 1)
     }
 
     private func activitySelfTest(report url: URL) async {
@@ -1005,7 +1045,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
         }
         checks["thinkingFramesVisiblyChange"] = uniquePNGs.count >= 4
-        checks["capsuleStaysCompact"] = edgePanel?.frame.size == EdgeDockGeometry.tabSize
+        checks["capsuleStaysCompact"] = edgePanel.map { [EdgeDockGeometry.tabSize, EdgeDockGeometry.handleSize].contains($0.frame.size) } ?? false
         var reducedFrames = Set<Data>()
         for phase in [0.0, 0.5] {
             let root = EdgeTabReadout(window: sample, activityPhase: .working, animateActivity: true, fixedThinkingPhase: phase, reduceMotionOverride: true)
@@ -1226,6 +1266,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         exportView(detailsPanel?.contentView, to: dir.appendingPathComponent("details.png"))
         if let geometry = edgeGeometry() {
             edgeState.edge = geometry.edge
+            edgeState.isTucked = false
             edgePanel?.setFrame(geometry.tab, display: true)
             edgePanel?.contentView?.setBoundsSize(EdgeDockGeometry.tabSize)
             exportView(edgePanel?.contentView, to: dir.appendingPathComponent("edge-tab.png"))
@@ -1235,6 +1276,9 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         try? await Task.sleep(nanoseconds: 300_000_000)
         exportView(hoverDetailsPanel?.contentView, to: dir.appendingPathComponent("hover-details.png"))
         hideHoverDetails()
+        edgeState.isTucked = true; collapseOrb()
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        exportView(edgePanel?.contentView, to: dir.appendingPathComponent("edge-hidden.png"))
         previewQuotaHUD(.low)
         quotaHUD.pauseAnimationForCapture(true)
         try? await Task.sleep(nanoseconds: 400_000_000)

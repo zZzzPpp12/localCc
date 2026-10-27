@@ -160,15 +160,19 @@ struct EdgeTabView: View {
 
     var body: some View {
         Button(action: openDetails) {
-            EdgeTabReadout(window: store.window(.short), stale: store.isStale,
-                           warning: store.lastError != nil || store.blocked,
-                           activityPhase: activity.phase, animateActivity: activity.animationActive)
+            if state.isTucked {
+                EdgeHandleReadout(window: store.window(.short), stale: store.isStale)
+            } else {
+                EdgeTabReadout(window: store.window(.short), stale: store.isStale,
+                               warning: store.lastError != nil || store.blocked,
+                               activityPhase: activity.phase, animateActivity: activity.animationActive)
+            }
         }
         .buttonStyle(.plain)
         .overlay { PointerDragSurface(clicked: openDetails, dragged: dragChanged, ended: dragEnded).accessibilityHidden(true) }
         .onHover(perform: hoverChanged)
         .accessibilityLabel("Codex Orbit 侧边标签，\(summary)，\(store.statusText)，\(activity.phase.description)。按住拖动调整位置，移入指针查看额度详情")
-        .help("按住拖动调整位置，松手吸附侧边；移入查看额度详情")
+        .help("移入展开额度胶囊与详情，移出自动隐藏；按住拖动调整位置")
         .contextMenu {
             Button("额度详情", action: openDetails)
             Button("设置…", action: openSettings)
@@ -179,6 +183,22 @@ struct EdgeTabView: View {
         QuotaPeriod.allCases.map { period in
             "\(store.window(period)?.title ?? period.fallbackTitle)剩余 \(store.window(period)?.percentText ?? "未知")"
         }.joined(separator: "，")
+    }
+}
+
+struct EdgeHandleReadout: View {
+    let window: QuotaWindow?
+    var stale = false
+    private var tint: Color {
+        guard !stale, let remaining = window?.remaining else { return .gray }
+        return remaining < 30 ? .red : (remaining < 60 ? .yellow : OrbitPalette.mint)
+    }
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.88))
+            Capsule().fill(tint.opacity(0.9)).frame(width: 3, height: 26)
+        }.frame(width: EdgeDockGeometry.handleSize.width, height: EdgeDockGeometry.handleSize.height)
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(tint.opacity(0.25), lineWidth: 0.5))
     }
 }
 
@@ -393,7 +413,7 @@ struct OrbitSettingsView: View {
                 Image(systemName: "circle.hexagongrid").font(.system(size: 30)).foregroundStyle(OrbitPalette.mint)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Codex Orbit").font(.system(size: 20, weight: .semibold))
-                    Text("薄荷双环 · v0.8.1").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("薄荷双环 · v0.8.2").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }.padding(24)
             Form {
