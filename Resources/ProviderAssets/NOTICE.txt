@@ -1,0 +1,8 @@
+Codex / OpenAI provider mark
+
+The bundled codex.png is an unchanged copy of chatgpt.png from:
+https://github.com/jazzenchen/agent-hud-open/tree/main/src/packages/hud/src/assets
+
+Upstream identifies this as the shared Codex / ChatGPT provider artwork and retains the LobeHub icons MIT notice, reproduced in LobeIcons-LICENSE.txt.
+Provider names and marks remain the branding of their respective owners.
+Codex Orbit is an independent local utility and is not affiliated with OpenAI.

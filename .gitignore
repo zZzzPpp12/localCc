@@ -1,0 +1,13 @@
+.build/
+.DS_Store
+dist/
+qa/
+
+# Local tooling, credentials and caches
+.codex/
+.agents/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
