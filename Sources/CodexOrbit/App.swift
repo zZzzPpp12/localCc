@@ -767,7 +767,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func diagnosticObject() -> [String: Any] {
-        var result: [String: Any] = ["application": "Codex Orbit", "version": "0.8.2", "status": store.statusText, "cliDetected": store.cliPath != nil]
+        var result: [String: Any] = ["application": "Codex Orbit", "version": "0.8.3", "status": store.statusText, "cliDetected": store.cliPath != nil]
         if let error = store.lastError { result["error"] = error }
         if let snapshot = store.snapshot {
             result["accountType"] = snapshot.account.type
@@ -819,7 +819,7 @@ final class OrbitAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let notifications = await UNUserNotificationCenter.current().notificationSettings()
         let delivered = await UNUserNotificationCenter.current().deliveredNotifications()
         let geometry = edgeGeometry()
-        let report: [String: Any] = ["bundlePath": Bundle.main.bundleURL.path, "version": "0.8.2",
+        let report: [String: Any] = ["bundlePath": Bundle.main.bundleURL.path, "version": "0.8.3",
                                    "loginItemStatus": launchAtLogin.statusCode,
                                    "loginItemEnabled": launchAtLogin.isEnabled,
                                    "autoHideAtEdge": preferences.autoHideAtEdge,

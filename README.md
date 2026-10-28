@@ -1,6 +1,6 @@
 # Codex Orbit
 
-原生 macOS Codex 套餐额度悬浮工具，薄荷双环界面。SwiftUI + AppKit，无第三方库。当前版本 v0.8.2。
+原生 macOS Codex 套餐额度悬浮工具，薄荷双环界面。SwiftUI + AppKit，无第三方库。当前版本 v0.8.3。
 
 ## 运行
 

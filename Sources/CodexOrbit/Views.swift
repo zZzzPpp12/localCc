@@ -431,7 +431,7 @@ struct OrbitSettingsView: View {
                 Image(systemName: "circle.hexagongrid").font(.system(size: 30)).foregroundStyle(OrbitPalette.mint)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Codex Orbit").font(.system(size: 20, weight: .semibold))
-                    Text("薄荷双环 · v0.8.2").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("薄荷双环 · v0.8.3").font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }.padding(24)
             Form {
